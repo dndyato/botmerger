@@ -17,7 +17,6 @@ from telegram.ext import (
 # OWNER ONLY
 # ==========================================
 OWNER_ID = 7675369659
-GENERATOR_BOT_ID = 8467916124     # 🔥 YOUR GENERATOR BOT ID
 
 def owner_only(func):
     async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE, *args, **kwargs):
@@ -82,41 +81,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==========================================
-#🔥 METHOD 2 — GROUP FILE RECEIVER (NO OWNER CHECK)
-# ==========================================
-async def group_file_listener(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    if not message or not message.document:
-        return
-
-    # Only accept files sent by your GENERATOR BOT
-    if message.from_user.id != GENERATOR_BOT_ID:
-        return
-
-    document = message.document
-    user_id = OWNER_ID  # Merge into owner's workflow automatically
-
-    if not document.file_name.lower().endswith(".txt"):
-        return
-
-    unique_name = f"{int(time.time()*1000)}_{random.randint(1000,9999)}_{document.file_name}"
-    file_path = os.path.join(FOLDER, unique_name)
-
-    tg_file = await document.get_file()
-    await tg_file.download_to_drive(custom_path=file_path)
-
-    user_files.setdefault(user_id, []).append(file_path)
-
-    await update_status_message(update, context, user_id)
-
-    if user_id in merge_tasks:
-        merge_tasks[user_id].cancel()
-
-    merge_tasks[user_id] = asyncio.create_task(schedule_merge(update, context, user_id))
-
-
-# ==========================================
-# RECEIVE FILE (PRIVATE CHAT ONLY)
+# RECEIVE FILE
 # ==========================================
 @owner_only
 async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -127,8 +92,10 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Send .txt files only.")
         return
 
+    # Track message id for later deletion
     file_message_ids.setdefault(user_id, []).append(update.message.message_id)
 
+    # Delete file message immediately
     try:
         await context.bot.delete_message(user_id, update.message.message_id)
     except:
@@ -144,6 +111,7 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update_status_message(update, context, user_id)
 
+    # Reset merge timer
     if user_id in merge_tasks:
         merge_tasks[user_id].cancel()
 
@@ -229,6 +197,7 @@ async def perform_merge(update, context, user_id: int, filename: str):
 
     merged_path = os.path.join(FOLDER, filename)
 
+    # Initial progress message
     msg = await context.bot.send_message(
         chat_id=user_id,
         text=f"🔄 Merging **{len(files)} files**…\n[░░░░░░░░░░░░░░░░░░] 0%",
@@ -258,6 +227,7 @@ async def perform_merge(update, context, user_id: int, filename: str):
         except:
             pass
 
+    # Streaming merge
     for filepath in files:
         with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
             buffer_lines = []
@@ -266,8 +236,10 @@ async def perform_merge(update, context, user_id: int, filename: str):
                 processed_bytes += len(line.encode("utf-8"))
                 buffer_lines.append(line)
 
+                # Process every 10k lines
                 if len(buffer_lines) >= 10000:
-                    cleaned = remove_headers("".join(buffer_lines))
+                    text_block = "".join(buffer_lines)
+                    cleaned = remove_headers(text_block)
                     for combo in extract_userpass(cleaned):
                         seen.add(combo)
                     buffer_lines = []
@@ -275,16 +247,21 @@ async def perform_merge(update, context, user_id: int, filename: str):
                 if processed_bytes % 200000 < 500:
                     await update_progress()
 
+            # Process leftovers
             if buffer_lines:
-                cleaned = remove_headers("".join(buffer_lines))
+                text_block = "".join(buffer_lines)
+                cleaned = remove_headers(text_block)
                 for combo in extract_userpass(cleaned):
                     seen.add(combo)
 
+    # Write output
     with open(merged_path, "w", encoding="utf-8") as out:
         out.write("\n".join(seen))
 
+    # Send merged file
     await context.bot.send_document(user_id, open(merged_path, "rb"))
 
+    # Cleanup
     for f in files:
         try: os.remove(f)
         except: pass
@@ -292,6 +269,7 @@ async def perform_merge(update, context, user_id: int, filename: str):
     try: os.remove(merged_path)
     except: pass
 
+    # Delete progress
     try:
         await context.bot.delete_message(user_id, merge_status_msg[user_id])
     except:
@@ -300,6 +278,7 @@ async def perform_merge(update, context, user_id: int, filename: str):
     merge_status_msg.pop(user_id, None)
     awaiting_filename.pop(user_id, None)
 
+    # Delete source uploaded messages
     for msg_id in file_message_ids.get(user_id, []):
         try:
             await context.bot.delete_message(user_id, msg_id)
@@ -308,6 +287,7 @@ async def perform_merge(update, context, user_id: int, filename: str):
 
     file_message_ids[user_id] = []
 
+    # Delete "files received" status
     if user_id in status_messages:
         try:
             await context.bot.delete_message(user_id, status_messages[user_id])
@@ -335,18 +315,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # MAIN
 # ==========================================
 def main():
-    TOKEN = "8321320025:AAFjz9S2PQe-uwC1BUBFVZRwv57XqAzmhfg"  # 🔥 YOUR BOT TOKEN
+    TOKEN = "8321320025:AAFjz9S2PQe-uwC1BUBFVZRwv57XqAzmhfg"
 
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-
-    # 🔥 NEW HANDLER FOR GROUP RECEIVING
-    app.add_handler(MessageHandler(filters.ChatType.GROUPS & filters.Document.ALL, group_file_listener))
-
-    # PRIVATE CHAT RECEIVING
     app.add_handler(MessageHandler(filters.Document.ALL, receive_file))
-
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_filename))
     app.add_handler(CallbackQueryHandler(button_handler))
 
