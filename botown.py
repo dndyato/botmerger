@@ -48,23 +48,44 @@ file_message_ids = {}
 # ==========================================
 # CLEANERS
 # ==========================================
-def remove_headers(text: str) -> str:
-    pattern = r"""
-        🔑?\s*PREMIUM\s+ACCOUNTS\s+FOR\s+\d+.*?
-        Generated:\s*\d{4}-\d{2}-\d{2}.*?
-        Total:\s*\d+.*?
-        Format:\s*User:Pass\s*Format.*?
-        (?:━+|_+|-+)?
-    """
-    cleaned = re.sub(pattern, "", text, flags=re.MULTILINE | re.DOTALL | re.VERBOSE)
-    cleaned = re.sub(r"\n\s*\n", "\n", cleaned)
-    return cleaned.strip()
 
+# Remove ONLY known header lines (safe)
+def remove_headers(text: str) -> str:
+    header_keywords = [
+        "PREMIUM ACCOUNTS",
+        "Generated:",
+        "Total:",
+        "Format:",
+        "User:Pass",
+        "━━━━",
+        "____",
+        "----"
+    ]
+
+    cleaned = []
+    for line in text.splitlines():
+        if any(key.lower() in line.lower() for key in header_keywords):
+            continue
+        cleaned.append(line)
+
+    return "\n".join(cleaned)
+
+# STRICT: accept ONLY user:pass
+combo_regex = re.compile(r'^[^:]+:[^:]+$')
 
 def extract_userpass(text: str) -> list[str]:
-    lines = text.splitlines()
-    pattern = re.compile(r"^[^:\s]+:[^:\s]+$")
-    return [line.strip() for line in lines if pattern.match(line.strip())]
+    results = []
+
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+
+        line = line.strip().replace(" ", "")
+
+        if combo_regex.match(line):
+            results.append(line)
+
+    return results
 
 
 # ==========================================
@@ -92,10 +113,8 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("⚠️ Send .txt files only.")
         return
 
-    # Track message id for later deletion
     file_message_ids.setdefault(user_id, []).append(update.message.message_id)
 
-    # Delete file message immediately
     try:
         await context.bot.delete_message(user_id, update.message.message_id)
     except:
@@ -111,7 +130,6 @@ async def receive_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update_status_message(update, context, user_id)
 
-    # Reset merge timer
     if user_id in merge_tasks:
         merge_tasks[user_id].cancel()
 
@@ -185,7 +203,7 @@ async def handle_filename(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ==========================================
-# MERGE PROCESS (20MB SAFE)
+# MERGE PROCESS
 # ==========================================
 @owner_only
 async def perform_merge(update, context, user_id: int, filename: str):
@@ -197,7 +215,6 @@ async def perform_merge(update, context, user_id: int, filename: str):
 
     merged_path = os.path.join(FOLDER, filename)
 
-    # Initial progress message
     msg = await context.bot.send_message(
         chat_id=user_id,
         text=f"🔄 Merging **{len(files)} files**…\n[░░░░░░░░░░░░░░░░░░] 0%",
@@ -227,41 +244,34 @@ async def perform_merge(update, context, user_id: int, filename: str):
         except:
             pass
 
-    # Streaming merge
     for filepath in files:
         with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
-            buffer_lines = []
+            buffer = []
 
             for line in f:
-                processed_bytes += len(line.encode("utf-8"))
-                buffer_lines.append(line)
+                processed_bytes += len(line)
 
-                # Process every 10k lines
-                if len(buffer_lines) >= 10000:
-                    text_block = "".join(buffer_lines)
-                    cleaned = remove_headers(text_block)
-                    for combo in extract_userpass(cleaned):
+                buffer.append(line)
+
+                if len(buffer) >= 10000:
+                    block = remove_headers("".join(buffer))
+                    for combo in extract_userpass(block):
                         seen.add(combo)
-                    buffer_lines = []
+                    buffer = []
 
                 if processed_bytes % 200000 < 500:
                     await update_progress()
 
-            # Process leftovers
-            if buffer_lines:
-                text_block = "".join(buffer_lines)
-                cleaned = remove_headers(text_block)
-                for combo in extract_userpass(cleaned):
+            if buffer:
+                block = remove_headers("".join(buffer))
+                for combo in extract_userpass(block):
                     seen.add(combo)
 
-    # Write output
     with open(merged_path, "w", encoding="utf-8") as out:
         out.write("\n".join(seen))
 
-    # Send merged file
     await context.bot.send_document(user_id, open(merged_path, "rb"))
 
-    # Cleanup
     for f in files:
         try: os.remove(f)
         except: pass
@@ -269,7 +279,6 @@ async def perform_merge(update, context, user_id: int, filename: str):
     try: os.remove(merged_path)
     except: pass
 
-    # Delete progress
     try:
         await context.bot.delete_message(user_id, merge_status_msg[user_id])
     except:
@@ -278,7 +287,6 @@ async def perform_merge(update, context, user_id: int, filename: str):
     merge_status_msg.pop(user_id, None)
     awaiting_filename.pop(user_id, None)
 
-    # Delete source uploaded messages
     for msg_id in file_message_ids.get(user_id, []):
         try:
             await context.bot.delete_message(user_id, msg_id)
@@ -287,7 +295,6 @@ async def perform_merge(update, context, user_id: int, filename: str):
 
     file_message_ids[user_id] = []
 
-    # Delete "files received" status
     if user_id in status_messages:
         try:
             await context.bot.delete_message(user_id, status_messages[user_id])
